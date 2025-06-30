@@ -1,7 +1,8 @@
-our $DEBUG            is export  = 0;
+our $PROTO-DEBUG            is export = 0;
+our $PROTO-SCRIPT-DEBUG     is export = 0;
 
 sub checkDEBUG ($d = 1) is export {
-  $DEBUG >= $d;
+  $PROTO-DEBUG >= $d;
 }
 
 INIT {
@@ -9,11 +10,11 @@ INIT {
   if $v {
     say '»————————————> setting debug';
     if $v.Int -> \v {
-      $DEBUG = v unless v ~~ Failure;
+      $PROTO-DEBUG = v unless v ~~ Failure;
     }
-    $DEBUG //= 1;
+    $PROTO-DEBUG //= 1;
 
-    say "Setting DEBUG level to { $DEBUG }" if $DEBUG;
+    say "Setting DEBUG level to { $PROTO-DEBUG }" if $PROTO-DEBUG;
   }
 
   Nil;
