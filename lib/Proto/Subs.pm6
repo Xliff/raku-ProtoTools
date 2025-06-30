@@ -2,6 +2,8 @@ use v6.c;
 
 use NativeCall;
 
+use Proto::Debug;
+use Proto::Config;
 use Proto::Exceptions;
 
 unit package Proto::Subs;
@@ -140,10 +142,10 @@ sub find-files (
 
   gather {
     WHILE: while @targets {
-      say "T: { @targets.gist }" if $GTK-SCRIPT-DEBUG;
+      say "T: { @targets.gist }" if $PROTO-SCRIPT-DEBUG;
 
       my $elem = @targets.shift;
-      say "E: $elem" if $GTK-SCRIPT-DEBUG;
+      say "E: $elem" if $PROTO-SCRIPT-DEBUG;
       do given $elem {
         when .d {
           if $depth {
@@ -170,10 +172,10 @@ sub find-files (
 
           for @pattern-arg -> $p {
             say "Testing: { $elem.absolute } / P: { $p.gist }"
-              if $GTK-SCRIPT-DEBUG;
+              if $PROTO-SCRIPT-DEBUG;
             next WHILE unless $elem.absolute ~~ $p
           }
-          say "Valid: { $elem.absolute }" if $GTK-SCRIPT-DEBUG;
+          say "Valid: { $elem.absolute }" if $PROTO-SCRIPT-DEBUG;
           take $elem;
         }
 
@@ -202,6 +204,80 @@ sub get-raw-module-files is export {
   get-lib-files( pattern => / '/Raw/' /, extension => 'pm6' )
 }
 
+sub nullTerminatedArraySize (
+  $data where $data.REPR eq 'CArray',
+
+  :$max = 4096
+)
+  is export
+{
+  my $idx = 0;
+  repeat {
+    return $max if $idx > $max - 1
+  } while $data[$idx++];
+  $idx;
+}
+
+sub resolveBuffer (
+   $s        is copy,
+  :$carray            = True,
+  :$pointer           = $carray.not,
+  :$encoding          = 'utf8',
+  :$hash              = False
+)
+  is export
+{
+  if $s !~~ ( utf8, Str, Buf, Array, CArray[uint8] ) {
+    $s .= Str   if $s.^can('Str');
+    $s .= Buf   if $s.^can('Buf')   && $s !~~ Str;
+    $s .= Blob  if $s.^can('Blob')  && $s !~~ (Str, Buf);
+    $s .= Array if $s.^can('Array') && $s !~~ (Str, Buf, Blob).any;
+  }
+
+  my $l;
+  my $b = do given $s {
+    when Str {
+      $l //= .chars;
+      $_ = .encode($encoding);
+      proceed
+    }
+
+    when Buf | utf8 | Blob {
+      $l //= .bytes;
+      $_ = CArray[uint8].new( |$_, 0 );
+      proceed
+    }
+
+    when Array {
+      $l //= .elems;
+      $_ = ArrayToCArray(uint8, $_);
+      proceed
+    }
+
+    when CArray[uint8] {
+      do if $pointer {
+        $_ = cast(Pointer, $_);
+        proceed;
+      } else {
+        $_;
+      }
+    }
+
+    when Pointer {
+      $_;
+    }
+
+    default {
+      X::GLib::InvalidType.new(
+        message => "Could not process input to resolveString! {
+                    '' } A { $s.^name } is not compatible."
+      ).throw;
+    }
+  }
+
+  $hash ?? { buffer => $b, size => $l } !! $b;
+}
+
 sub malloc         (size_t                    --> Pointer)  is export is native { * }
 sub realloc        (Pointer, size_t           --> Pointer)  is export is native { * }
 sub calloc         (size_t,  size_t           --> Pointer)  is export is native { * }
@@ -210,6 +286,16 @@ sub memcmp         (Pointer, Pointer, size_t  --> int32)    is export is native 
 sub memset         (Pointer, int32,   size_t)               is export is native { * }
 sub dup2           (int32,   int32            --> int32)    is export is native { * }
 sub isatty         (int32                     --> int32)    is export is native { * }
+
+sub strlen_c (CArray[uint8] --> size_t)
+  is export
+  is native
+  is symbol('strlen')
+{ * }
+
+sub strlen (Str() $str, :$carray = True, :$encoding = 'utf8') is export {
+  strlen_c( resolveBuffer($str, :$carray, :$encoding) );
+}
 
 # Needed for minimal I18n
 sub setlocale      (int32,   Str              --> Str)      is export is native { * }
@@ -309,9 +395,11 @@ sub real-resolve-uint64($v) is export {
 }
 
 # p = Pointer
-sub p ($p) is export {
-  cast(Pointer, $p);
-}
+
+# cw: Conflict with parsing token. One will need to be renamed!
+# sub p ($p) is export {
+#   cast(Pointer, $p);
+# }
 
 # ba = Byte Array
 sub ba ($o) is export {
@@ -415,7 +503,7 @@ sub updateHash (%h, %ct, :$reverse = True) {
 sub resolveNativeType (\T) is export {
   say "Resolving { T.^name } to its Raku equivalent..."
     if checkDEBUG(2);
-uint32
+
   do given T {
     when num32 | num64     { Num }
 
@@ -442,7 +530,7 @@ uint32
 
 sub checkForType(\T, $v is copy) is export {
   if T !=== Nil {
-    unless $v ~~ uint32T {
+    unless $v ~~ uint32 {
       #say "Attempting to convert a { $v.^name } to { T.^name }...";
       my $resolved-name = resolveNativeType(T).^name;
       $resolved-name ~= "[{ T.of.^name }]" if $resolved-name eq 'CArray';
@@ -484,7 +572,7 @@ sub ArrayToCArray(\T, Array() $a, :$size = $a.elems, :$null = False)
     }
   });
 
-  say "CA: { $ca.^name } / { $size }" if $DEBUG;
+  say "CA: { $ca.^name } / { $size }" if $PROTO-DEBUG;
 
   return $ca unless $a.elems;
   $ca = $ca.new;
@@ -505,3 +593,66 @@ sub ArrayToCArray(\T, Array() $a, :$size = $a.elems, :$null = False)
 
   $ca;
 }
+
+# The assumption here is "Transfer: Full"
+multi sub propReturnObject (
+  $oo,
+  $raw,
+  :$construct is required
+)
+  is export
+{
+  samewith($oo, $raw, Mu, :$construct);
+}
+multi sub propReturnObject (
+   $oo,
+   $raw,
+   \P,
+   $C?                   is raw,
+  :$role,
+  :$construct,
+  :$ref                  is copy   = False,
+  :attempt(:$attempt-real-resolve) = False
+)
+  is export
+{
+  my $o = $oo;
+  return Nil unless $o;
+
+  $o = cast(P, $o) if P.REPR eq <CPointer CStruct CArray>.any;
+  return $construct($o, :$raw, :$ref) if     $construct;
+  return $o                           if     $C === (Nil, Any).any || $raw;
+
+  my $CLASS;
+  # cw: Refactor needed. A new variable $CCLASS must be used to determined
+  #     the type returned. If $attempt-real-resolve is set this is done
+  #     via TypeManifest, otherwise $CLASS := $C;
+  #
+  #     So, for now...
+  $CLASS := $C;
+
+  $ref = False unless $C.^can('ref');
+  my $object = $C.new($o, :$ref);
+  $object does $role unless $role === (Nil, Any).any;
+
+  return $object unless $attempt-real-resolve;
+
+  # cw: To attempt a real resolve means you MUST be GObject descendant.
+  # my $objType := $C;
+  # my $o1   = GLib::Object.new( cast(GObject, $o) );
+  # my $type = $o1.objectType.name;
+  #
+  # # Recast type if not exact.
+  # $o1 = cast( ::($type), $o ) unless $o1 ~~ ::($type);
+  #
+  # if findObjectInManifest($o.WHAT) -> $mt {
+  #   $objType := $mt;
+  # }
+  #
+  # $object = $objType.new($o1, :$ref);
+  # $object does $role unless $role === (Nil, Any).any;
+  # $object;
+}
+
+sub returnObject       (|c) is export { propReturnObject( |c ) }
+sub returnProperObject (|c) is export { propReturnObject( |c ) }
